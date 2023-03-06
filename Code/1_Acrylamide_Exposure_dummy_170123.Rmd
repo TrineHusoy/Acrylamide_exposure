@@ -1,0 +1,513 @@
+---
+title: "Acrylamide_Exposure"
+output:
+  word_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_collapsed: yes
+editor_options:
+  chunk_output_type: console
+fontsize: 10pt
+Autor: Trine Husøy
+---
+# Introduction
+
+The original individual data from the EuroMix study cannot be freely shared. Therefore, the dummy data files uploaded in this code is created based on the data from the EuroMix study, where the ID numbers and all the columns are sampled randomly and independent across the columns for all the files. This creates new ID with completely new combinations of food consumption, sex, weight and height. The acrylamide concentration data is not dummy data and are the same data that has been used in the exposure assessment in the manuscript.
+
+The code shown how the exposure assessment is done in the manuscript from food consumption data and acrylamide concentration data in food, and this code use only dummy consumption data from the diary of day one of the EuroMix study.
+
+# R-Packages and knitr settings
+
+Define knitr chunk options
+
+For more info in Markdown and knitr chunk options see [rmarkdown-cookbook](https://bookdown.org/yihui/rmarkdown-cookbook/chunk-options.html)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  comment = "#>", echo = TRUE, warning = FALSE, error = FALSE, message = FALSE, fig.width = 6)
+```
+
+# Activate packages
+```{r}
+
+library(ggplot2)
+library(ggpubr)
+library(writexl)
+library(MASS)
+library(survival)
+library(fitdistrplus)
+library(Rcpp)
+library(openxlsx)
+library(tidyverse)
+library(kableExtra)
+
+```
+
+# Get work directory and organise results
+
+```{r}
+
+HOME <- "F:/Forskningsprosjekter/PDB 1996 - EUROMIX - European t_/Forskningsfiler/TRHU/R/Acrylamide_exposure"
+setwd(HOME)
+
+```
+
+Create a folder with current date in the Result folder
+```{r}
+
+newday <- file.path('F:/Forskningsprosjekter/PDB 1996 - EUROMIX - European t_/Forskningsfiler/TRHU/R/Acrylamide_exposure/Results', Sys.Date())
+dir.create(newday)
+
+```
+
+
+# Read in data
+
+When running R-code with output in console use "./". When running R-code with output inline and/or when compiling a markdown document use "../" for all file paths (i.e. find and replace all as needed).
+```{r}
+ConcAcrylamide <- read_csv2("./Data/NO_2014_akrylamid_Trine_240522.csv")
+
+FoodIntakeDay1_dummy <- read_csv2("./Data/EuroMix_dummy_foodconsum_diary1.csv")
+
+SexWeight_dummy <- read_csv2("./Data/EuroMix_dummy_sex_weight.csv")
+
+Adduct_dummy <- read_csv2("./Data/EuroMix_dummy_AdductExp.csv")
+Adduct_dummy<-na.omit(Adduct_dummy)# remove NA from Adduct dataset
+
+
+```
+
+# Functions
+
+Calculate the location (Loc) and scale (shape) parameters of the log normal distribution
+```{r}
+
+Lognorm_Loc <- function(x){
+  log(
+    x$mean^2/sqrt(x$sd^2+x$mean^2)
+  )
+  
+}
+
+
+Lognorm_shape <- function(x){
+  sqrt(
+    log(
+      1 + x$sd^2/x$mean^2
+    )
+  )
+}
+```
+
+Calculate summary data 
+```{r}
+Sum <-function(x){
+  x %>%
+  group_by(FoodCat) %>%
+  summarise(
+    N = n(),
+    mean = mean(Conc, na.rm=TRUE),
+    sd=sd(Conc, na.rm=TRUE),
+    min=min(Conc, na.rm=TRUE),
+    P05=quantile(Conc, .05, na.rm=TRUE),
+    P50=quantile(Conc, .50, na.rm=TRUE),
+    P95=quantile(Conc, .95, na.rm=TRUE),
+    max=max(Conc, na.rm=TRUE)
+  )
+}  
+
+Sum_1 <-function(x){
+  x %>%
+  group_by(IDkode) %>%
+  summarise(
+    N = n(),
+    mean = mean(value, na.rm=TRUE),
+    sd=sd(value, na.rm=TRUE),
+    min=min(value, na.rm=TRUE),
+    P05=quantile(value, .05, na.rm=TRUE),
+    P50=quantile(value, .50, na.rm=TRUE),
+    P95=quantile(value, .95, na.rm=TRUE),
+    max=max(value, na.rm=TRUE)
+  )
+}  
+```
+
+The MC_Sim function performs the Monte Carlo (MC) simulation. It creates an empty array (X), and take the food consumption data (y) and multiply this with a random selection of concentration data (z) for each food category where the log-normal distribution is defined by loc and shape parameters. The MC is repeated 1000 times. 
+
+To have the same value in different trials, addition of a "seed" using "set.seed(123)" is needed, where "123" could be any number, but always the same.
+```{r}
+
+MC_Sim <- function(x, y ,z){
+  set.seed(123)
+  MC <- 1000
+  x <- array(dim = c(nrow(y),nrow(z),MC))
+  y[,1] <- NULL
+  for (u in 1:MC){
+    for(i in 1:nrow(z)){
+      x[,i,u] <- y[,i]*
+      rlnorm(n=1,z$Loc[i], z$Shape[i])
+  }
+ }
+  return(x)
+}
+
+
+```
+
+
+# Cleaning of data
+
+
+## Acrylamid concentrations in food
+```{r}
+
+ConcAcrylamide <- ConcAcrylamide %>% # select the variables you want to use
+  dplyr::select(FoodCat,Conc)
+
+
+ConcAcrylamide %>% replace_na(list(Conc = 0)) # replace NAs by zero
+
+```
+
+Make a wide table with food categories as columns
+```{r}
+ConcAcrylamide_wide <- ConcAcrylamide %>% mutate(observations = 1:n()) # define each entry as individual observations. Otherwise spread will not work
+ConcAcrylamide_wide <- spread(ConcAcrylamide_wide, FoodCat, Conc) # A lot of NAs, but will be removed when making a vector
+
+
+Biscuits <- as.vector(ConcAcrylamide_wide$Biscuits)
+Biscuits <- Biscuits[!is.na(Biscuits)] # remowe the NA's
+
+Crisps <- as.vector(ConcAcrylamide_wide$Crisps)
+Crisps <- Crisps[!is.na(Crisps)] # remowe the NA's
+
+Crispbread <- as.vector(ConcAcrylamide_wide$Crispbread)
+Crispbread <- Crispbread[!is.na(Crispbread)] # remowe the NA's
+```
+
+
+### Check the distribution of the acrylamide concentrations for several distributions and food categories
+
+Biscuits
+```{r}
+# lognormal
+fit.lnorm <- fitdist(Biscuits, "lnorm")
+plot(fit.lnorm)
+
+# gamma
+fit.gamma <- fitdist(Biscuits, "gamma")
+#plot(fit.gamma)
+
+
+# weibull
+fit.weibull <- fitdist(Biscuits, "weibull")
+#plot(fit.weibull)
+```
+
+Crisps
+```{r}
+# lognormal
+fit.lnorm <- fitdist(Crisps, "lnorm")
+#plot(fit.lnorm)
+
+# gamma
+fit.gamma <- fitdist(Crisps, "gamma")
+#plot(fit.gamma)
+
+
+# weibull
+fit.weibull <- fitdist(Crisps, "weibull")
+#plot(fit.weibull)
+
+
+# normal distribution
+fit.norm <- fitdist(Crisps, "norm")
+#plot(fit.norm)
+```
+
+Crispbread
+```{r}
+# lognormal
+fit.lnorm <- fitdist(Crispbread, "lnorm")
+#plot(fit.lnorm)
+
+# gamma
+fit.gamma <- fitdist(Crispbread, "gamma")
+#plot(fit.gamma)
+
+# normal distribution
+fit.norm <- fitdist(Crispbread, "norm")
+#plot(fit.norm)
+```
+
+### Make summary data of the acrylamide concentrations
+```{r}
+SumConcAcrylamide <- Sum(ConcAcrylamide)
+
+knitr::kable(SumConcAcrylamide, digits = 1) %>% kable_styling(font_size = 10, bootstrap_options = c("striped"))
+```
+
+Delete the FoodCat that will not be used in the exposure assessment later
+```{r}
+SumConcAcrylamide<- SumConcAcrylamide[!SumConcAcrylamide$FoodCat == "Mixed", ]
+SumConcAcrylamide<- SumConcAcrylamide[!SumConcAcrylamide$FoodCat == "CoffeeBean", ]
+SumConcAcrylamide<- SumConcAcrylamide[!SumConcAcrylamide$FoodCat == "Crisps_veg", ]
+```
+
+Calculate the location  and shape parameter from mean and SD defining the log-normal distribution
+```{r}
+SumConcAcrylamide$Loc <- SumConcAcrylamide %>% Lognorm_Loc()
+SumConcAcrylamide$Shape <- SumConcAcrylamide %>% Lognorm_shape()
+```
+
+Save the file
+```{r}
+write.xlsx(SumConcAcrylamide,
+           file = file.path(newday,"SumConcAcrylamide.xlsx"),
+           colNames = TRUE, borders = "rows"
+)
+```
+
+## Food intake 
+
+
+### Select the variables for which we have acrylamide concentrations
+
+```{r}
+FoodIntakeDay1_dummy <- dplyr::select(FoodIntakeDay1_dummy, c(IDkode, Biscuits,Bread,Cereal, Coffee, Crispbread, Crisps, FrenchFries, PotatoFried, PotatoTortilla))
+
+FoodIntakeDay1_dummy <- as.data.frame(FoodIntakeDay1_dummy)# make the file a data frame
+
+
+knitr::kable(head(FoodIntakeDay1_dummy), digits = 2) %>% kable_styling(font_size = 10, bootstrap_options = c("striped"))
+```
+
+
+# Probabilistic exposure estimates from the diary
+
+```{r}
+Acrylamide_Diary_dummy <- MC_Sim(Acrylamide_Diary, FoodIntakeDay1_dummy, SumConcAcrylamide)/1000 # divide on 1000 to get ug/day
+
+print(Acrylamide_Diary_dummy[1,,7]) # to check the data
+
+```
+
+
+### Add acrylamide exposure (in ug) from all food categories to a total exposure pr person from 1000 iterations
+```{r}
+Acrylamide_Diary_dummy_t <- as_tibble(matrix(NA, nrow = nrow(Acrylamide_Diary_dummy), ncol = 1000))
+
+for (i in 1:1000){
+  Acrylamide_Diary_dummy_t[,i] <- rowSums(Acrylamide_Diary_dummy [,,i]) 
+  } 
+
+Acrylamide_Diary_dummy_t$IDkode <- FoodIntakeDay1_dummy$IDkode #Get IDs
+
+```
+
+
+### Make a long table of the total exposure to make summary data for each ID
+```{r}
+Acrylamide_Diary_dummy_t <- gather(Acrylamide_Diary_dummy_t, MC, value, 1:1000)
+```
+
+### Make summary data of total acrylamide intake for each ID
+```{r}
+SumAcrylamideDiaryTotal_dummy <- Sum_1(Acrylamide_Diary_dummy_t) # ug/day
+knitr::kable(head(SumAcrylamideDiaryTotal_dummy), digits = 2) %>% kable_styling(font_size = 10, bootstrap_options = c("striped"))
+```
+
+Save the file
+```{r}
+write.xlsx(SumAcrylamideDiaryTotal_dummy,
+           file = file.path(newday, "SumAcrylamideDiaryTotal_dummy.xlsx"),
+           colNames = TRUE, borders = "rows"
+)
+```
+
+Make summary data expressed as ug/kg bw/day
+
+```{r}
+SumAcrylamideDiaryTotal_dummy_kg <- merge(SumAcrylamideDiaryTotal_dummy, SexWeight_dummy, by = "IDkode", all = TRUE) 
+SumAcrylamideDiaryTotal_dummy_kg <- na.omit(SumAcrylamideDiaryTotal_dummy_kg) # remove NAs
+SumAcrylamideDiaryTotal_dummy_kg <- SumAcrylamideDiaryTotal_dummy_kg[,3:9]/SumAcrylamideDiaryTotal_dummy_kg$con_weight
+SumAcrylamideDiaryTotal_dummy_kg$IDkode <- SumAcrylamideDiaryTotal_dummy$IDkode
+```
+
+Save file
+```{r}
+write.xlsx(SumAcrylamideDiaryTotal_dummy_kg,
+           file = file.path(newday,"SumAcrylamideDiaryTotal_dummy_kg.xlsx"),
+           colNames = TRUE, borders = "rows"
+)
+```
+
+
+## Calculate the contribution from the different food categories
+
+
+Take the average over all MC for each food category for each individual. 
+
+```{r}
+
+Acrylamide_Diary_FoodCat_dummy <- as_tibble(matrix(NA, nrow = nrow(Acrylamide_Diary_dummy), ncol = 9))
+
+for (i in 1:9){
+  Acrylamide_Diary_FoodCat_dummy[,i] <- rowSums(Acrylamide_Diary_dummy[,i,], na.rm = TRUE)/1000
+}
+
+ColName_FoodCat <- names(FoodIntakeDay1_dummy[,2:10])  #The coloumns named with food categories
+ColName_FoodCat
+colnames(Acrylamide_Diary_FoodCat_dummy) <- ColName_FoodCat
+
+Acrylamide_Diary_FoodCat_dummy$IDkode <- FoodIntakeDay1_dummy[,1]
+
+Acrylamide_Diary_FoodCat_dummy <- gather(Acrylamide_Diary_FoodCat_dummy, FoodCat, Conc, Biscuits:PotatoTortilla, factor_key = TRUE )
+
+
+```
+
+
+### Make summary data for each food category
+
+```{r}
+SumAcrylamide_Diary_FoodCat_dummy <- Sum(Acrylamide_Diary_FoodCat_dummy)
+```
+
+
+Save the file
+```{r}
+write.xlsx(SumAcrylamide_Diary_FoodCat_dummy,
+           file = file.path(newday,"SumAcrylamide_Diary_FoodCat_dummy.xlsx"),
+           colNames = TRUE, borders = "rows"
+)
+```
+
+
+### Box-plot of all IDs per food category
+
+```{r}
+Plot_acrylamide_Diary_FoodCat_dummy <- ggplot(data = Acrylamide_Diary_FoodCat_dummy, aes(y=Conc, x=FoodCat, colour = FoodCat)) +
+  geom_boxplot()+
+  scale_colour_hue()+
+  theme_minimal()+
+  scale_y_log10(limits=c(0.5,150), labels = scales::comma)+
+  theme(axis.text.x = element_text(angle = 90, size = 11), axis.title = element_text(size = 14),
+        axis.text.y = element_text(size = 11),legend.position= "none")+
+  xlab("Food category")+
+  ylab("Acrylamide exposure (ug/day)")+
+  annotate("text", x=9, y=100, label="Diary", size=6)
+
+Plot_acrylamide_Diary_FoodCat_dummy
+
+
+ggsave(filename=file.path(newday, "Plot_acrylamide_Diary_FoodCat_dummy.jpeg"),
+       device = NULL,
+       width=NA,
+       height=NA,
+       units="mm")
+
+```
+
+
+## Compare the exposure assesment with exposure calculated from the adducts
+
+
+Merge estimated exposure from the diaries (in ug/kg bw/day) with the estimated exposure from the adducts
+```{r}
+
+Exposure_all_dummy <- SumAcrylamideDiaryTotal_dummy_kg %>% 
+  dplyr::select(IDkode,mean, P50)%>%
+  left_join(Adduct_dummy,by = "IDkode" )
+
+Exposure_all_dummy<- na.omit(Exposure_all_dummy)
+
+```
+
+
+```{r}
+write.xlsx(Exposure_all_dummy,
+           file = file.path(newday,"Exposure_all_dummy.xlsx"),
+           colNames = TRUE, borders = "rows"
+)
+```
+
+### Make cumulative density plots
+
+Estimated exposure from adducts compared to the mean exposure from the diary
+```{r}
+
+A = c(Exposure_all_dummy$ADDUCT, Exposure_all_dummy$mean)
+B = replicate(nrow(Exposure_all_dummy),"Adduct")
+C = replicate(nrow(Exposure_all_dummy),"mean_diary")
+E = c(B,C)
+
+Acrylamide_mean <- as.data.frame(matrix(NA,nrow = nrow(Exposure_all_dummy)*2, ncol = 2))
+Acrylamide_mean[1] <- A
+Acrylamide_mean[2] <- E
+
+names(Acrylamide_mean)[1] <- "Acrylamide"
+names(Acrylamide_mean)[2] <- "Exposure"
+
+Acrylamide_mean<- as.data.frame(Acrylamide_mean)
+
+```
+
+
+```{r}
+
+
+Plot_Acrylamide_mean <- ggplot(data = Acrylamide_mean, aes(Acrylamide, colour = Exposure)) +
+  geom_line(stat = "ecdf", size = 0.7)+
+  scale_colour_hue()+
+  theme_minimal()+
+  scale_x_continuous(limits=c(0.001, 1.5))+
+  theme(axis.text.x = element_text(angle = 90, size = 11), axis.title = element_text(size = 14),
+        axis.text.y = element_text(size = 11))+
+  xlab("Acrylamide (ug/kg bw/day)")+
+  ylab("Cumulative probability")
+
+Plot_Acrylamide_mean
+
+ggsave(filename=file.path(newday,"Plot_Acrylamide_mean.jpeg"),
+       device = NULL,
+       width=NA,
+       height=NA,
+       units="mm")
+```
+
+
+
+
+### Bland Altman Plots
+
+Adducts versus mean from the diaries
+```{r}
+Exposure_all_dummy <- Exposure_all_dummy %>% mutate(avg_mean = rowMeans(Exposure_all_dummy %>% dplyr::select("ADDUCT", "mean"))) # calculate means of the to measurments for each ID
+Exposure_all_dummy$diff <- Exposure_all_dummy$ADDUCT - Exposure_all_dummy$mean # calculate difference in measurements for each ID
+
+
+mean_diff <- mean(Exposure_all_dummy$diff) # calculate average difference
+lower_diff <- mean_diff - 1.96*sd(Exposure_all_dummy$diff) # calculate lower 95% conf int
+upper_diff <- mean_diff + 1.96*sd(Exposure_all_dummy$diff) # calculate lower 95% conf int
+
+
+Plot_BA_adduct_meanDiary <- ggplot(Exposure_all_dummy, aes(x = avg_mean, y = diff)) +
+  geom_point(size=2) +
+  geom_hline(yintercept = mean_diff) +
+  geom_hline(yintercept = lower_diff, color = "red", linetype="dashed") +
+  geom_hline(yintercept = upper_diff, color = "red", linetype="dashed") +
+  ggtitle("Acrylamide adduct versus mean form diary") +
+  ylab("Difference Between Measurements") +
+  xlab("Average Measurement")+
+  theme(plot.title = element_text(size = 20, face = "bold"), axis.text=element_text(size=12), axis.title=element_text(size=15))
+
+Plot_BA_adduct_meanDiary
+
+ggsave(filename=file.path(newday, "Plot_BA_adduct_meanDiary.jpeg"),
+       device = NULL,
+       width=NA,
+       height=NA,
+       units="mm")
+```
