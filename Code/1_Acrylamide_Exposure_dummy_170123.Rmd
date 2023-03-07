@@ -33,7 +33,7 @@ knitr::opts_chunk$set(
 
 library(ggplot2)
 library(ggpubr)
-library(survival)
+library(writexl)
 library(fitdistrplus)
 library(openxlsx)
 library(tidyverse)
