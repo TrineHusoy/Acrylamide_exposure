@@ -1,4 +1,4 @@
-# Acrylamide_exposure
+# Acrylamide exposure from diet
 
 In this project we calculate the individual exposure of acrylamide from diet and compare this estimate with an exposure estimate based on measured acrylamide hemoglobin adducts in the blood of the same individuals. We use data from the EuroMix biomonitoring study in the project. The results will be published in the paper "Dietary intake of acrylamide in the Norwegian EuroMix biomonitoring study: comparing probabilistic dietary estimates with Hb adduct measurements" by Efstathios Vryonidis, Margareta Törnqvist, Oddvar Myhre, Hubert Dirven, Trine Husøy.
 
